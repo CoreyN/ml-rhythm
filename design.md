@@ -43,20 +43,24 @@ The user should not need to manually enter BPM, tap a tempo, or do anything beyo
   ┌─────┴──────────────────────┐
   │  Audio Processing Pipeline │
   │                            │
-  │  1. Source Separation       │
+  │  1. Noise Filtering        │
+  │     (remove environmental  │
+  │      background noise)     │
+  │                            │
+  │  2. Source Separation       │
   │     (metronome vs guitar)  │
   │                            │
-  │  2. Metronome Analysis     │
+  │  3. Metronome Analysis     │
   │     → tempo & grid         │
   │                            │
-  │  3. Onset Detection        │
+  │  4. Onset Detection        │
   │     (guitar signal)        │
   │                            │
-  │  4. Pitch Detection        │
+  │  5. Pitch Detection        │
   │     (single notes, power   │
   │      chords, double stops) │
   │                            │
-  │  5. Grid Alignment         │
+  │  6. Grid Alignment         │
   │     → snap onsets to grid  │
   │     → compute deviations   │
   │                            │
@@ -74,9 +78,83 @@ The user should not need to manually enter BPM, tap a tempo, or do anything beyo
 
 ## Pipeline Detail
 
-### 1. Source Separation
+### 1. Environmental Noise Filtering
 
-**Problem:** The app receives a mixed signal containing both the metronome click and the guitar. These must be separated to independently analyze tempo (from the click) and note timing (from the guitar).
+**Problem:** The app is used in real-world environments where the microphone picks up more than just the guitar and metronome. Background noise from household appliances, street noise, and other environmental sources can confuse downstream stages — causing false onset detections, corrupting metronome click detection, and degrading pitch estimation. This stage removes or suppresses environmental noise before the signal reaches source separation.
+
+**Noise categories and characteristics:**
+
+| Category | Examples | Spectral Profile | Temporal Profile |
+|---|---|---|---|
+| **Appliance hum/rumble** | Refrigerator, dishwasher, dryer, HVAC, furnace | Low-frequency dominant (50/60 Hz hum + harmonics, broadband rumble) | Continuous/stationary — consistent spectral shape over long durations |
+| **Motor/engine noise** | Cars revving, motorcycles, lawnmowers | Broadband with strong low-mid harmonics, varies with RPM | Semi-stationary — slowly varying fundamental with harmonic overtones |
+| **Sirens and horns** | Emergency sirens, car horns, truck air horns | Tonal, sweeping mid-high frequency (500 Hz–3 kHz for sirens) | Non-stationary — frequency sweeps or short bursts |
+| **Impact/transient noise** | Doors slamming, construction, dogs barking | Broadband impulses or irregular bursts | Impulsive/intermittent |
+| **Ambient broadband** | Wind noise, rain, traffic wash, crowd noise | Broadband, often shaped like pink/brown noise | Continuous, slowly varying |
+
+**Approach — Hybrid filtering pipeline:**
+
+The noise filtering stage uses a layered approach, combining fast classical methods with a lightweight ML denoiser:
+
+**Layer 1 — Spectral gating (stationary noise removal):**
+
+- During a brief calibration window before the user starts playing (or during detected silence gaps), estimate the background noise spectral profile
+- Apply spectral gating: for each frequency bin, if energy is below `noise_floor + threshold`, suppress it
+- This handles continuous appliance noise (refrigerator hum, HVAC, dryer rumble) effectively and cheaply
+- Minimal latency cost — operates per-frame on the STFT
+
+**Layer 2 — Adaptive notch filtering (tonal interference):**
+
+- Detect persistent tonal components that don't match expected guitar or metronome frequencies (e.g., 50/60 Hz mains hum, appliance motor tones)
+- Apply narrow adaptive notch filters to suppress these specific frequencies
+- Track slowly drifting tonal noise (engine RPM changes, siren sweeps) by updating filter center frequencies over time
+
+**Layer 3 — ML denoiser (non-stationary noise):**
+
+- A small neural network (RNNoise-style architecture or lightweight Conv-TasNet) trained to separate "guitar + metronome" from "everything else"
+- This handles the hard cases: engine revving, sirens, barking, transient impacts — noise sources whose spectral and temporal profiles overlap with guitar
+- The model should be small enough for real-time inference (<5ms per chunk)
+
+**Architecture considerations for ML denoiser:**
+
+- Input: raw audio frames or STFT magnitude
+- Output: denoised audio (or a multiplicative mask applied to the STFT)
+- RNNoise-style GRU network (~60K parameters) is proven for real-time denoising at minimal CPU cost
+- Alternatively, a small U-Net operating on mel spectrogram patches if GPU is available
+- The denoiser does not need to be perfect — it just needs to clean the signal enough that downstream source separation and onset detection aren't confused
+
+**Noise profile estimation:**
+
+- On session start, before the user plays, capture 1–2 seconds of "room tone" to build an initial noise profile for spectral gating
+- The UI already has a "listening for tempo..." phase — the noise profile can be estimated during this same window
+- Continuously update the noise profile during detected rest periods (no guitar or metronome activity)
+
+**Graceful degradation:**
+
+- If the environment is too noisy for reliable filtering (SNR too low), surface a warning to the user: "High background noise detected — results may be less accurate"
+- SNR estimation: compare energy in guitar-frequency bands vs estimated noise floor
+- The ML denoiser should be trained with a wide range of SNR conditions (clean through severely noisy) so it degrades gracefully rather than failing abruptly
+
+**Training data generation (ML denoiser):**
+
+- Clean signals: guitar + metronome mixes (reuse source separation training data)
+- Noise sources for augmentation:
+  - **Appliances:** Record or source samples of refrigerators, dishwashers, dryers, washing machines, HVAC systems, microwave hum
+  - **Vehicles:** Engine idling, revving at various RPMs (cars, motorcycles, trucks), engine pass-bys, exhaust rumble
+  - **Street noise:** Sirens (police, ambulance, fire), car horns, truck air brakes, traffic wash
+  - **Household:** TV/radio bleed, conversations in adjacent rooms, dogs barking, doors/cabinets closing
+  - **Weather/ambient:** Wind against microphone, rain on windows, thunder
+  - **Construction/yard:** Lawnmowers, leaf blowers, hammering, power tools at distance
+- Mix clean signals with noise at various SNR levels (-5 dB to +30 dB)
+- Apply random noise onset/offset within the clip (noise may start or stop mid-session)
+- Labels: the clean guitar + metronome signal (the denoiser learns to output this)
+- Dataset: 10,000+ clips with diverse noise combinations
+
+### 2. Source Separation
+
+**Input:** Audio that has been cleaned by the noise filtering stage (environmental noise removed/suppressed).
+
+**Problem:** The cleaned signal still contains both the metronome click and the guitar. These must be separated to independently analyze tempo (from the click) and note timing (from the guitar).
 
 **Approach — ML model (recommended):**
 
@@ -96,7 +174,7 @@ A lightweight U-Net or Conv-TasNet variant operating on short audio chunks shoul
 
 **Fallback approach:** If source separation proves too heavy for real-time use, an alternative is spectral filtering. Metronome clicks tend to occupy a distinct spectral profile from guitar. A bandpass filter tuned to common click frequencies, combined with transient detection, may suffice for many metronome types. This could be a fast first pass before investing in ML separation.
 
-### 2. Metronome Analysis
+### 3. Metronome Analysis
 
 **Input:** Isolated or filtered metronome signal.
 
@@ -110,7 +188,7 @@ A lightweight U-Net or Conv-TasNet variant operating on short audio chunks shoul
 
 **Latency consideration:** The app cannot provide timing feedback until the grid is established (minimum ~2 beats). The UI should indicate "listening for tempo..." during this phase.
 
-### 3. Onset Detection (Guitar)
+### 4. Onset Detection (Guitar)
 
 **Input:** Isolated or filtered guitar signal.
 
@@ -139,7 +217,7 @@ Train a CNN or CRNN on mel spectrograms (or CQT) to classify each frame as "onse
 
 **Alternative:** Before training a custom model, benchmark **madmom** and **librosa** onset detection on distorted guitar samples. If accuracy is acceptable (>90% on your test cases), skip custom training and use off-the-shelf.
 
-### 4. Pitch Detection
+### 5. Pitch Detection
 
 **Input:** Isolated guitar signal, segmented by detected onsets.
 
@@ -171,7 +249,7 @@ For power chords and double stops:
 
 **Output:** For each onset, emit: `{ time, pitch_or_chord, deviation_from_grid, early_or_late }`
 
-### 5. Grid Alignment & Deviation Calculation
+### 6. Grid Alignment & Deviation Calculation
 
 **Input:** Detected onset times + established beat grid.
 
@@ -199,7 +277,8 @@ For power chords and double stops:
 For real-time feedback, the full pipeline (audio capture → processing → display) should target <100ms total latency.
 
 - Audio capture buffer: ~10–20ms (512–1024 samples at 44.1kHz)
-- Processing: must be fast enough to keep up with the audio stream
+- Noise filtering: ~2–5ms (spectral gating is near-instant; ML denoiser must be lightweight)
+- Source separation + downstream processing: must fit within remaining budget
 - WebSocket round-trip: ~1–5ms (localhost-like, since backend is local or low-latency)
 - Display update: next animation frame (~16ms)
 
@@ -333,20 +412,27 @@ For each training example:
 4. Apply slight pitch shift (±50 cents) and time stretch
 5. Place on a timeline at known positions
 6. Optionally layer with metronome clicks at known tempo
-7. Add background noise (room tone, amp hiss, string noise)
+7. Add background noise:
+   - Guitar-inherent: amp hiss, string noise, pickup buzz, fret rattle
+   - Room tone: ambient room noise at various levels
+   - Environmental: appliance hum (fridge, HVAC, dishwasher), vehicle noise (engines, motorcycles), street noise (sirens, horns, traffic), household sounds (TV bleed, conversations, dogs barking)
+   - This ensures onset detection and pitch models are robust to the same noise the denoiser may not fully remove
 
 ### Labels
 
+- **Noise filtering model:** clean guitar + metronome signal as target (model learns to remove environmental noise)
 - **Onset detection model:** binary onset labels at known sample placement times
 - **Pitch detection model:** MIDI note number(s) at each onset
 - **Source separation model:** clean metronome track and clean guitar track as targets
 
 ### Dataset Size
 
-- Aim for 10,000+ synthetic clips for onset detection
+- 10,000+ synthetic clips for noise filtering (clean guitar+metronome mixed with diverse environmental noise)
+- 10,000+ synthetic clips for onset detection
 - 5,000+ for pitch detection
 - 5,000+ for source separation
 - Validate on real recorded guitar (record yourself playing known riffs with known timing)
+- For noise filtering validation: record real sessions with intentional background noise (appliances running, window open to street noise) to test robustness
 
 ---
 
@@ -387,17 +473,21 @@ guitar-timing-app/
 │   │   └── schemas.py            # Request/response schemas
 │   ├── audio/
 │   │   ├── pipeline.py           # Main audio processing pipeline
+│   │   ├── noise_filter.py       # Environmental noise filtering (spectral gate + ML denoiser)
 │   │   ├── source_separation.py  # Metronome/guitar separation
 │   │   ├── metronome_detector.py # Tempo & beat grid detection
 │   │   ├── onset_detector.py     # Guitar onset detection
 │   │   ├── pitch_detector.py     # Pitch/chord identification
 │   │   └── grid_aligner.py       # Grid snapping & deviation calc
 │   ├── models/
+│   │   ├── noise_model.py        # PyTorch noise filtering model (RNNoise-style or small U-Net)
 │   │   ├── onset_model.py        # PyTorch onset detection model
 │   │   ├── separation_model.py   # PyTorch source separation model
 │   │   └── pitch_model.py        # PyTorch pitch model (if needed)
 │   ├── training/
 │   │   ├── data_generator.py     # Synthetic training data pipeline
+│   │   ├── noise_sources.py      # Environmental noise dataset curation & mixing
+│   │   ├── train_noise_filter.py # Noise filter model training script
 │   │   ├── train_onset.py        # Onset model training script
 │   │   ├── train_separation.py   # Separation model training script
 │   │   └── augmentations.py      # Audio augmentation utilities
@@ -429,29 +519,32 @@ guitar-timing-app/
 ### Phase 1 — Proof of Concept
 
 1. Audio capture (frontend) → WebSocket → backend
-2. Basic onset detection (librosa/madmom, no custom ML yet)
-3. Manual BPM input (skip metronome detection initially)
-4. Grid alignment and deviation calculation
-5. Simple text-based report (no notation yet)
+2. Basic spectral gating for noise suppression (no ML yet — estimate noise profile from silence, apply gate)
+3. Basic onset detection (librosa/madmom, no custom ML yet)
+4. Manual BPM input (skip metronome detection initially)
+5. Grid alignment and deviation calculation
+6. Simple text-based report (no notation yet)
 
 ### Phase 2 — Core Features
 
-6. Metronome detection (source separation or spectral filtering)
-7. Custom onset detection model (trained on distorted guitar)
-8. Real-time feedback display
-9. Notation rendering with VexFlow
-10. Audio recording and playback
+7. Metronome detection (source separation or spectral filtering)
+8. Custom onset detection model (trained on distorted guitar, augmented with environmental noise)
+9. ML noise filter model (RNNoise-style, trained on diverse environmental noise)
+10. Real-time feedback display
+11. Notation rendering with VexFlow
+12. Audio recording and playback
 
 ### Phase 3 — Polish
 
-11. Pitch detection integration
-12. Session statistics and histograms
-13. Configurable timing thresholds
-14. UI polish and mobile responsiveness
+13. Pitch detection integration
+14. Session statistics and histograms
+15. Configurable timing thresholds
+16. Noise level indicator / warning UI
+17. UI polish and mobile responsiveness
 
 ### Phase 4 — V2
 
-15. Bend detection
-16. Swing rhythm support
-17. Built-in metronome option
-18. Session history / progress tracking
+18. Bend detection
+19. Swing rhythm support
+20. Built-in metronome option
+21. Session history / progress tracking
