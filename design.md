@@ -9,12 +9,13 @@ A web application that listens to a guitarist playing along to an external metro
 ## Core User Flow
 
 1. User opens the app
-2. Selects grid resolution (8th notes or 16th notes)
-3. Clicks "Start"
-4. Starts their external metronome and plays guitar
-5. App listens, detects the metronome to establish tempo/grid, detects guitar onsets, and provides real-time timing feedback
-6. User clicks "Stop"
-7. App displays a full session report with notation, timing deviations, and audio playback
+2. (Optional) Runs the calibration wizard to record spectral profiles of their metronome and guitar
+3. Selects grid resolution (8th notes or 16th notes) and timing threshold
+4. Clicks "Start"
+5. Starts their external metronome and plays guitar
+6. App listens, detects the metronome to establish tempo/grid, detects guitar onsets, and provides real-time timing feedback
+7. User clicks "Stop"
+8. App displays a full session report with notation, timing deviations, statistics, and audio playback
 
 The user should not need to manually enter BPM, tap a tempo, or do anything beyond clicking start and selecting grid resolution.
 
@@ -24,61 +25,132 @@ The user should not need to manually enter BPM, tap a tempo, or do anything beyo
 
 ### Stack
 
-- **Frontend:** React (TypeScript)
-- **Backend:** Python, Litestar
-- **ML Framework:** PyTorch
-- **Audio I/O:** Web Audio API (frontend), streamed to backend via WebSocket
+- **Frontend:** React 19 (TypeScript), Vite 6, VexFlow 5
+- **Backend:** Python, Litestar 2, librosa, NumPy, soundfile
+- **Audio I/O:** Web Audio API + AudioWorklet (frontend), streamed to backend via WebSocket
+- **ML Framework (planned):** PyTorch (for future custom onset detection and noise filtering models)
 
 ### High-Level Architecture
 
 ```
 [Microphone/Audio Interface]
         |
-  [Web Audio API] — captures raw audio
+  [Web Audio API + AudioWorklet] — captures raw PCM audio
         |
-  [WebSocket stream]
+  [WebSocket stream — binary framed: 0x00 control, 0x01 audio]
         |
   [Litestar Backend]
         |
-  ┌─────┴──────────────────────┐
-  │  Audio Processing Pipeline │
-  │                            │
-  │  1. Noise Filtering        │
-  │     (remove environmental  │
-  │      background noise)     │
-  │                            │
-  │  2. Source Separation       │
-  │     (metronome vs guitar)  │
-  │                            │
-  │  3. Metronome Analysis     │
-  │     → tempo & grid         │
-  │                            │
-  │  4. Onset Detection        │
-  │     (guitar signal)        │
-  │                            │
-  │  5. Pitch Detection        │
-  │     (single notes, power   │
-  │      chords, double stops) │
-  │                            │
-  │  6. Grid Alignment         │
-  │     → snap onsets to grid  │
-  │     → compute deviations   │
-  │                            │
-  └────────────────────────────┘
+  ┌──────────────────────────────────────────┐
+  │  Audio Processing Pipeline (current)     │
+  │                                          │
+  │  1. Onset Detection                      │
+  │     (energy-based, adaptive RMS)         │
+  │                                          │
+  │  2. Metronome Detection                  │
+  │     (periodicity analysis on all onsets, │
+  │      grid lock after 4+ periodic clicks) │
+  │                                          │
+  │  3. Onset Classification                 │
+  │     (timing proximity + spectral MFCC    │
+  │      calibration to separate clicks      │
+  │      from guitar notes)                  │
+  │                                          │
+  │  4. Grid Alignment                       │
+  │     → snap guitar onsets to grid         │
+  │     → compute signed deviations          │
+  │                                          │
+  └──────────────────────────────────────────┘
         |
-  [WebSocket — real-time results]
+  [WebSocket — real-time JSON events]
         |
   [React Frontend]
   → real-time timing indicators
-  → session report & notation
-  → audio playback
+  → session report & notation (VexFlow)
+  → waveform display & audio playback
 ```
 
 ---
 
-## Pipeline Detail
+## Pipeline Detail — Current Implementation
 
-### 1. Environmental Noise Filtering
+The current pipeline uses a 4-stage approach that processes all onsets from a mixed audio signal (no source separation). Metronome clicks are identified via periodicity analysis, and guitar notes are classified by exclusion (plus optional spectral calibration).
+
+### 1. Onset Detection (Energy-Based)
+
+**Input:** Raw mixed audio (guitar + metronome) streamed in ~46ms chunks at 44.1kHz.
+
+**Approach — Adaptive RMS energy detection:**
+
+The `RealtimeOnsetDetector` processes audio incrementally with a streaming design:
+
+- Compute RMS energy per frame with asymmetric baseline tracking (fast rise, slow decay) to maintain sensitivity across dynamic range
+- Detect onsets when energy exceeds `baseline × threshold` with a hysteresis gate to avoid double-triggers
+- Apply a configurable minimum inter-onset interval (default 50ms) to suppress retriggering
+- All onsets (both metronome clicks and guitar notes) are detected in a single pass on the mixed signal
+
+This approach works well for clean to moderate-gain guitar. For high-gain distortion where dynamics are heavily compressed, a future ML-based onset detector would improve accuracy (see Planned Pipeline Enhancements below).
+
+### 2. Metronome Detection (Periodicity Analysis)
+
+**Input:** All detected onset times from stage 1.
+
+**Approach — Inter-onset interval periodicity search:**
+
+The `MetronomeDetector` receives every onset and searches for periodic patterns without requiring source separation:
+
+- Maintain a history of all onset times
+- For each new onset, compute inter-onset intervals (IOIs) against previous onsets
+- Search for a dominant period by finding IOIs that recur consistently (within 25ms tolerance)
+- **Grid lock:** After finding 4+ onsets that match a periodic pattern, declare the grid as locked and establish BPM + reference time
+- **Linear regression refinement:** Every 4 additional clicks, refit the grid line (`time = reference + index × period`) using all click times to correct for cumulative drift
+- **Post-lock click tracking:** New onsets near expected click times (within tolerance) are classified as metronome clicks; the grid is continuously refined
+
+**Latency:** The grid cannot be established until ~4 beats have been heard. The UI shows "listening for tempo..." during this phase.
+
+### 3. Onset Classification (Timing + Spectral)
+
+**Input:** Onset times + established beat grid + optional calibration profiles.
+
+**Approach — Hybrid timing/spectral classification:**
+
+After the grid is locked, each new onset is classified as either a metronome click or a guitar note:
+
+- **Timing-based:** If the onset falls near an expected click time (based on the periodic grid), it's initially classified as a click
+- **Spectral override (requires calibration):** If calibration profiles exist, extract MFCC features from the audio around the onset and compare via cosine similarity to the stored metronome and guitar profiles. If timing says "click" but the spectrum says "guitar" (e.g., a guitar note played right on the beat), the spectral classification wins
+- **Without calibration:** Classification relies solely on timing proximity, which works well when the guitarist doesn't play exactly on every beat
+
+**Calibration profiles** are built via the CalibrationWizard in the frontend:
+1. User records a few seconds of metronome clicks alone → backend extracts MFCC mean, spectral centroid, and energy decay
+2. User records a few seconds of guitar playing alone → same feature extraction
+3. Profiles are stored in localStorage and sent with each session start
+
+### 4. Grid Alignment & Deviation Calculation
+
+**Input:** Guitar onset times (clicks excluded) + beat grid.
+
+**Process:**
+
+- For each guitar onset, find the nearest grid position (8th or 16th note subdivision)
+- Grid positions computed from: `time = reference_time + index × grid_interval`
+- Calculate signed deviation: `onset_time - nearest_grid_time`
+  - Negative = early, Positive = late
+  - Magnitude in milliseconds
+- Assign bar number and beat position within the bar
+- Handle coincident onsets: when a guitar note and metronome click merge into a single onset (playing right on the beat), emit both a click event and a note event
+
+**Thresholds (configurable):**
+
+- "In time": within ±threshold (user-configurable, 5–50ms, default 30ms)
+- On-time percentage calculated as notes within threshold / total notes
+
+---
+
+## Planned Pipeline Enhancements
+
+The following stages are designed but not yet implemented. They would be inserted before the current pipeline stages to improve accuracy in noisy or difficult conditions.
+
+### Environmental Noise Filtering (Planned)
 
 **Problem:** The app is used in real-world environments where the microphone picks up more than just the guitar and metronome. Background noise from household appliances, street noise, and other environmental sources can confuse downstream stages — causing false onset detections, corrupting metronome click detection, and degrading pitch estimation. This stage removes or suppresses environmental noise before the signal reaches source separation.
 
@@ -150,9 +222,11 @@ The noise filtering stage uses a layered approach, combining fast classical meth
 - Labels: the clean guitar + metronome signal (the denoiser learns to output this)
 - Dataset: 10,000+ clips with diverse noise combinations
 
-### 2. Source Separation
+### Source Separation (Planned)
 
 **Input:** Audio that has been cleaned by the noise filtering stage (environmental noise removed/suppressed).
+
+> **Current approach:** Instead of explicit source separation, the current implementation uses a combined timing + spectral classification approach (see stage 3 above) to distinguish metronome clicks from guitar notes in the mixed signal.
 
 **Problem:** The cleaned signal still contains both the metronome click and the guitar. These must be separated to independently analyze tempo (from the click) and note timing (from the guitar).
 
@@ -174,7 +248,9 @@ A lightweight U-Net or Conv-TasNet variant operating on short audio chunks shoul
 
 **Fallback approach:** If source separation proves too heavy for real-time use, an alternative is spectral filtering. Metronome clicks tend to occupy a distinct spectral profile from guitar. A bandpass filter tuned to common click frequencies, combined with transient detection, may suffice for many metronome types. This could be a fast first pass before investing in ML separation.
 
-### 3. Metronome Analysis
+### Metronome Analysis (Planned Enhancement)
+
+> **Current approach:** Metronome analysis is implemented via periodicity detection on the mixed signal (see stage 2 above). The planned enhancement below would operate on an isolated metronome signal from the source separation stage, which would improve accuracy.
 
 **Input:** Isolated or filtered metronome signal.
 
@@ -186,11 +262,11 @@ A lightweight U-Net or Conv-TasNet variant operating on short audio chunks shoul
 - Establish the beat grid: a series of expected beat times, subdivided to the user-selected resolution (8th or 16th notes)
 - The grid should stabilize after 2–4 beats and then track any minor tempo drift in the metronome (most will be rock-solid, but cheap metronomes can drift)
 
-**Latency consideration:** The app cannot provide timing feedback until the grid is established (minimum ~2 beats). The UI should indicate "listening for tempo..." during this phase.
-
-### 4. Onset Detection (Guitar)
+### Neural Onset Detection (Planned)
 
 **Input:** Isolated or filtered guitar signal.
+
+> **Current approach:** The current implementation uses energy-based (RMS) onset detection, which works well for clean to moderate-gain guitar. The neural approach below would improve accuracy for heavily distorted guitar where dynamics are compressed.
 
 **Problem:** Detecting note onsets in distorted guitar is the core ML challenge. Distortion compresses dynamics, smears transients, and adds sustain, making traditional energy-based onset detection unreliable.
 
@@ -217,7 +293,7 @@ Train a CNN or CRNN on mel spectrograms (or CQT) to classify each frame as "onse
 
 **Alternative:** Before training a custom model, benchmark **madmom** and **librosa** onset detection on distorted guitar samples. If accuracy is acceptable (>90% on your test cases), skip custom training and use off-the-shelf.
 
-### 5. Pitch Detection
+### Pitch Detection (Planned)
 
 **Input:** Isolated guitar signal, segmented by detected onsets.
 
@@ -249,24 +325,14 @@ For power chords and double stops:
 
 **Output:** For each onset, emit: `{ time, pitch_or_chord, deviation_from_grid, early_or_late }`
 
-### 6. Grid Alignment & Deviation Calculation
+### Grid Alignment & Deviation Calculation
 
-**Input:** Detected onset times + established beat grid.
+> **Status:** Implemented (see stage 4 in current pipeline above). The description below covers additional planned behaviors.
 
-**Process:**
+**Planned enhancements:**
 
-- For each detected onset, find the nearest grid position (8th or 16th note subdivision)
-- Calculate signed deviation: `onset_time - nearest_grid_time`
-  - Negative = early
-  - Positive = late
-  - Magnitude in milliseconds
-- For rests: identify grid positions with no onset within a threshold window and mark as rests
-- Flag "extra" onsets that don't correspond to any expected grid position (ghost notes, accidental string hits)
-
-**Thresholds (configurable):**
-
-- "In time": within ±10ms (tight) to ±30ms (loose) — make this user-configurable
-- "Rest": no onset within ±threshold of a grid position
+- **Rest detection:** Identify grid positions with no onset within a threshold window and mark as rests
+- **Extra onset flagging:** Flag onsets that don't correspond to any expected grid position (ghost notes, accidental string hits)
 
 ---
 
@@ -284,11 +350,13 @@ For real-time feedback, the full pipeline (audio capture → processing → disp
 
 ### Streaming Architecture
 
-- Frontend captures audio in chunks via Web Audio API (ScriptProcessorNode or AudioWorklet)
-- Chunks are streamed to backend over WebSocket as raw PCM or compressed audio
-- Backend processes each chunk incrementally (maintains rolling state)
-- Results are streamed back over the same WebSocket
+- Frontend captures audio via Web Audio API using an AudioWorklet processor (2048-sample chunks, ~46ms at 44.1kHz)
+- Chunks are streamed to backend over WebSocket as binary frames (0x01 prefix + Float32 PCM)
+- Control messages (start, stop, calibrate) use 0x00 prefix + JSON
+- Backend processes each chunk incrementally via `AudioPipeline` (maintains rolling state: onset detector, metronome detector, audio buffer)
+- Events are streamed back as JSON text frames over the same WebSocket
 - Frontend updates display in real-time
+- Session audio is saved server-side as WAV files in `backend/sessions/`
 
 ### Model Performance
 
@@ -349,30 +417,19 @@ For real-time feedback, the full pipeline (audio capture → processing → disp
 └──────────────────────────────────────────────┘
 ```
 
-**Notation rendering:** Use **VexFlow** (JavaScript music notation library) to render standard rhythmic notation. If pitch detection is active, display on a staff with correct pitches. Otherwise, render as rhythm-only on a single-line percussion-style staff.
+**Notation rendering:** Uses **VexFlow 5** to render rhythmic notation. Currently renders rhythm-only (pitch detection not yet implemented). Notes are color-coded by timing accuracy (green = on time, red = off).
 
-**Audio playback:** The raw audio from the session is recorded on the frontend (MediaRecorder API) and can be played back. Playback position is synced with the notation display so the user can see which note is being heard.
+**Audio playback:** Session audio is recorded server-side (WAV files in `backend/sessions/`). The frontend `AudioPlayback` component provides playback with seek capability.
+
+**Waveform display:** The `WaveformDisplay` component renders a canvas-based waveform visualization with onset markers overlaid, allowing visual inspection of detected events.
+
+**Calibration wizard:** The `CalibrationWizard` component guides the user through recording metronome clicks and guitar notes separately to build spectral profiles for improved onset classification.
 
 ---
 
 ## Data Models
 
-### Session
-
-```python
-@dataclass
-class Session:
-    id: str
-    started_at: datetime
-    ended_at: datetime | None
-    grid_resolution: Literal["8th", "16th"]
-    detected_bpm: float | None
-    timing_threshold_ms: float  # user-configurable tolerance
-    events: list[NoteEvent]
-    audio_blob_id: str | None  # reference to recorded audio
-```
-
-### NoteEvent
+### NoteEvent (Python — `audio/pipeline.py`)
 
 ```python
 @dataclass
@@ -380,11 +437,36 @@ class NoteEvent:
     time_seconds: float            # actual onset time in session
     nearest_grid_time: float       # snapped grid position
     deviation_ms: float            # signed: negative=early, positive=late
-    event_type: Literal["note", "rest", "extra"]
-    pitch: str | None              # e.g. "E2", "A5(power)", None if unknown
+    event_type: str                # "note" | "rest" | "extra"
+    pitch: str | None              # reserved for future pitch detection
     bar: int                       # which bar (1-indexed)
     beat_position: float           # position within bar (e.g. 1.0, 1.5, 2.25)
 ```
+
+### GridConfig (Python — `audio/grid_aligner.py`)
+
+```python
+@dataclass
+class GridConfig:
+    bpm: float
+    grid_resolution: str           # "8th" or "16th"
+    reference_time: float          # time of the first click (seconds)
+    # Computed: beat_duration, grid_interval
+```
+
+### TypeScript Types (`types/session.ts`)
+
+- `GridResolution` = `"8th" | "16th"`
+- `AppState` = `"idle" | "active" | "report" | "calibrating"`
+- `NoteEvent` — time, deviation_ms, bar, beat_position, is_on_time
+- `SessionReport` — bpm, grid_resolution, total_bars, events[], stats, metronome_stats, click_times
+- `SessionStats` — total_notes, mean/std/median deviation, accuracy_percent, worst deviation
+- `MetronomeStats` — jitter, drift, consistency percentages
+- `CalibrationProfile` — metronome + guitar `SourceProfile` (MFCC mean, spectral centroid, energy decay)
+
+### Session (Planned)
+
+A persistent `Session` dataclass for session history tracking is planned but not yet implemented. Currently, sessions are ephemeral — the `AudioPipeline` instance holds session state in memory and generates a one-time report on stop.
 
 ---
 
@@ -465,86 +547,96 @@ For each training example:
 ## Project Structure
 
 ```
-guitar-timing-app/
+ml-rhythm/
 ├── backend/
-│   ├── app.py                    # Litestar application entry point
+│   ├── app.py                      # Litestar application entry point
+│   ├── requirements.txt
 │   ├── api/
-│   │   ├── routes.py             # HTTP & WebSocket routes
-│   │   └── schemas.py            # Request/response schemas
+│   │   └── routes.py               # WebSocket & HTTP route handlers
 │   ├── audio/
-│   │   ├── pipeline.py           # Main audio processing pipeline
-│   │   ├── noise_filter.py       # Environmental noise filtering (spectral gate + ML denoiser)
-│   │   ├── source_separation.py  # Metronome/guitar separation
-│   │   ├── metronome_detector.py # Tempo & beat grid detection
-│   │   ├── onset_detector.py     # Guitar onset detection
-│   │   ├── pitch_detector.py     # Pitch/chord identification
-│   │   └── grid_aligner.py       # Grid snapping & deviation calc
-│   ├── models/
-│   │   ├── noise_model.py        # PyTorch noise filtering model (RNNoise-style or small U-Net)
-│   │   ├── onset_model.py        # PyTorch onset detection model
-│   │   ├── separation_model.py   # PyTorch source separation model
-│   │   └── pitch_model.py        # PyTorch pitch model (if needed)
-│   ├── training/
-│   │   ├── data_generator.py     # Synthetic training data pipeline
-│   │   ├── noise_sources.py      # Environmental noise dataset curation & mixing
-│   │   ├── train_noise_filter.py # Noise filter model training script
-│   │   ├── train_onset.py        # Onset model training script
-│   │   ├── train_separation.py   # Separation model training script
-│   │   └── augmentations.py      # Audio augmentation utilities
-│   └── requirements.txt
+│   │   ├── pipeline.py             # Main audio processing orchestration & NoteEvent dataclass
+│   │   ├── onset_detector.py       # RealtimeOnsetDetector (energy-based, adaptive RMS)
+│   │   ├── metronome_detector.py   # MetronomeDetector (periodicity analysis, grid refinement)
+│   │   ├── grid_aligner.py         # GridConfig (beat grid math, deviation calculation)
+│   │   ├── calibration.py          # Spectral feature extraction (MFCC, centroid, decay) & classification
+│   │   └── onset_classifier.py     # Supplementary spectral utilities
+│   └── sessions/                   # Recorded session WAV files (generated at runtime)
 ├── frontend/
-│   ├── src/
-│   │   ├── App.tsx
-│   │   ├── components/
-│   │   │   ├── SessionControls.tsx    # Start/stop, grid selector
-│   │   │   ├── RealTimeFeedback.tsx   # Live timing display
-│   │   │   ├── SessionReport.tsx      # Post-session report
-│   │   │   ├── NotationDisplay.tsx    # VexFlow notation rendering
-│   │   │   ├── TimingHistogram.tsx    # Deviation distribution chart
-│   │   │   └── AudioPlayback.tsx      # Recorded audio player
-│   │   ├── hooks/
-│   │   │   ├── useAudioCapture.ts     # Web Audio API mic capture
-│   │   │   └── useWebSocket.ts        # WebSocket connection mgmt
-│   │   └── types/
-│   │       └── session.ts             # TypeScript type definitions
+│   ├── index.html
+│   ├── vite.config.ts              # Vite config with WebSocket proxy to backend
+│   ├── tsconfig.json
 │   ├── package.json
-│   └── tsconfig.json
+│   ├── public/
+│   │   └── audio-worklet-processor.js  # AudioWorklet for real-time audio capture
+│   └── src/
+│       ├── main.tsx                # React entry point
+│       ├── App.tsx                 # Root component & state machine (idle/active/report/calibrating)
+│       ├── App.css
+│       ├── components/
+│       │   ├── SessionControls.tsx     # Start/stop, grid selector, threshold slider
+│       │   ├── RealTimeFeedback.tsx    # Live BPM, grid dots, current deviation
+│       │   ├── SessionReport.tsx       # Post-session stats & tabbed report view
+│       │   ├── NotationDisplay.tsx     # VexFlow notation with timing coloring
+│       │   ├── AudioPlayback.tsx       # HTML5 audio player
+│       │   ├── WaveformDisplay.tsx     # Canvas waveform with onset markers
+│       │   └── CalibrationWizard.tsx   # Guided metronome & guitar profile recording
+│       ├── hooks/
+│       │   ├── useWebSocket.ts         # WebSocket connection management
+│       │   └── useAudioCapture.ts      # Web Audio API & AudioWorklet capture
+│       ├── types/
+│       │   └── session.ts              # TypeScript interfaces
+│       └── utils/
+│           ├── timing.ts               # Timing utility functions
+│           └── saveSession.ts          # Session export functionality
+├── design.md                       # This design document
 └── README.md
+```
+
+### Planned directories (not yet created)
+
+```
+├── backend/
+│   ├── models/                     # PyTorch model definitions (noise, onset, separation, pitch)
+│   └── training/                   # Training scripts, data generation, augmentation utilities
 ```
 
 ---
 
-## Implementation Priority
+## Implementation Status
 
-### Phase 1 — Proof of Concept
+### Completed
 
-1. Audio capture (frontend) → WebSocket → backend
-2. Basic spectral gating for noise suppression (no ML yet — estimate noise profile from silence, apply gate)
-3. Basic onset detection (librosa/madmom, no custom ML yet)
-4. Manual BPM input (skip metronome detection initially)
-5. Grid alignment and deviation calculation
-6. Simple text-based report (no notation yet)
+- Audio capture via Web Audio API + AudioWorklet → WebSocket → backend
+- Energy-based real-time onset detection (adaptive RMS with hysteresis)
+- Metronome detection via periodicity analysis (auto BPM, no manual input needed)
+- Beat grid establishment and continuous refinement via linear regression
+- Spectral calibration for click vs guitar classification (MFCC-based)
+- Grid alignment and signed timing deviation calculation
+- Real-time WebSocket event streaming (click_detected, grid_established, note_event)
+- Session report generation with timing statistics
+- Metronome quality analysis (jitter, drift, consistency)
+- React frontend with real-time timing feedback display
+- Post-session report with stats visualization
+- Notation rendering with VexFlow (rhythm-only, color-coded by timing)
+- Audio recording (server-side WAV) and playback
+- Waveform display with onset markers
+- Calibration wizard for spectral profile building
+- Configurable timing thresholds (5–50ms)
 
-### Phase 2 — Core Features
+### Not Yet Implemented
 
-7. Metronome detection (source separation or spectral filtering)
-8. Custom onset detection model (trained on distorted guitar, augmented with environmental noise)
-9. ML noise filter model (RNNoise-style, trained on diverse environmental noise)
-10. Real-time feedback display
-11. Notation rendering with VexFlow
-12. Audio recording and playback
+- Environmental noise filtering (spectral gating + ML denoiser)
+- ML source separation (metronome vs guitar isolation)
+- Neural onset detection model (for distorted guitar)
+- Pitch detection (CREPE, pYIN, or custom model)
+- Timing deviation histogram
+- Session history and progress tracking
+- Noise level indicator / warning UI
 
-### Phase 3 — Polish
+### Future (V2)
 
-13. Pitch detection integration
-14. Session statistics and histograms
-15. Configurable timing thresholds
-16. Noise level indicator / warning UI
-17. UI polish and mobile responsiveness
-
-### Phase 4 — V2
-
-18. Bend detection
-19. Swing rhythm support
-20. Built-in metronome option
-21. Session history / progress tracking
+- Bend detection
+- Swing rhythm support
+- Built-in metronome option (eliminates source separation requirement)
+- Other time signatures (3/4, 6/8)
+- Practice suggestions based on common timing errors
