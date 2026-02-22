@@ -1,0 +1,610 @@
+:root {
+  --bg: #0f0f1a;
+  --surface: #1a1a2e;
+  --surface-2: #222240;
+  --primary: #6366f1;
+  --accent: #e94560;
+  --text: #e2e8f0;
+  --text-dim: #64748b;
+  --green: #4ade80;
+  --yellow: #fbbf24;
+  --red: #f87171;
+  --radius: 8px;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: "SF Mono", "Fira Code", "JetBrains Mono", monospace;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+}
+
+.app {
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 2rem 1rem;
+}
+
+h1 {
+  text-align: center;
+  margin-bottom: 2rem;
+  font-size: 1.5rem;
+  letter-spacing: 0.05em;
+}
+
+/* ---------- Controls ---------- */
+
+.controls {
+  background: var(--surface);
+  padding: 1.5rem;
+  border-radius: var(--radius);
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.control-group {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.control-group label {
+  color: var(--text-dim);
+  font-size: 0.875rem;
+}
+
+.control-group input[type="number"],
+.control-group select {
+  background: var(--surface-2);
+  border: 1px solid var(--text-dim);
+  border-radius: 4px;
+  color: var(--text);
+  padding: 0.5rem;
+  font-family: inherit;
+  font-size: 1rem;
+  width: 120px;
+}
+
+.control-group input[type="range"] {
+  width: 160px;
+}
+
+.start-btn {
+  background: var(--primary);
+  color: white;
+  border: none;
+  border-radius: var(--radius);
+  padding: 0.75rem 1.5rem;
+  font-family: inherit;
+  font-size: 1rem;
+  cursor: pointer;
+  transition: opacity 0.2s;
+}
+
+.start-btn:hover {
+  opacity: 0.85;
+}
+
+.stop-btn {
+  background: var(--accent);
+  color: white;
+  border: none;
+  border-radius: var(--radius);
+  padding: 0.75rem 1.5rem;
+  font-family: inherit;
+  font-size: 1rem;
+  cursor: pointer;
+}
+
+/* ---------- Real-time feedback ---------- */
+
+.feedback {
+  background: var(--surface);
+  padding: 1.5rem;
+  border-radius: var(--radius);
+  margin-top: 1rem;
+  text-align: center;
+}
+
+.status {
+  color: var(--text-dim);
+  font-style: italic;
+}
+
+.detection-info {
+  font-size: 0.8rem;
+  margin-top: 0.5rem;
+  color: var(--text-dim);
+  font-style: normal;
+}
+
+.bpm-display {
+  color: var(--text-dim);
+  font-size: 0.875rem;
+  margin-bottom: 1rem;
+}
+
+.grid-display {
+  display: flex;
+  justify-content: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 1rem;
+}
+
+.grid-dot {
+  font-size: 1.25rem;
+  transition: color 0.15s;
+}
+
+.grid-dot.on-time {
+  color: var(--green);
+}
+
+.grid-dot.off-time {
+  color: var(--red);
+}
+
+.current-deviation {
+  font-size: 2rem;
+  font-weight: bold;
+}
+
+.current-deviation.good {
+  color: var(--green);
+}
+
+.current-deviation.bad {
+  color: var(--red);
+}
+
+/* ---------- Report ---------- */
+
+.report {
+  background: var(--surface);
+  padding: 1.5rem;
+  border-radius: var(--radius);
+}
+
+.report h2 {
+  margin-bottom: 1rem;
+}
+
+.report h3 {
+  margin: 1rem 0 0.5rem;
+  font-size: 1rem;
+  color: var(--text-dim);
+}
+
+.report-summary {
+  display: flex;
+  gap: 1.5rem;
+  flex-wrap: wrap;
+  padding: 0.75rem;
+  background: var(--surface-2);
+  border-radius: var(--radius);
+  margin-bottom: 1rem;
+  font-size: 0.875rem;
+}
+
+.report-stats {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.875rem;
+  color: var(--text-dim);
+}
+
+.note-timeline {
+  margin-top: 1rem;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.notes {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.note-entry {
+  display: flex;
+  justify-content: space-between;
+  padding: 0.25rem 0.5rem;
+  font-size: 0.8rem;
+  background: var(--surface-2);
+  border-radius: 4px;
+}
+
+.note-position {
+  color: var(--text-dim);
+}
+
+.report .start-btn {
+  margin-top: 1.5rem;
+  width: 100%;
+}
+
+/* ---------- Metronome Quality ---------- */
+
+.metronome-details {
+  margin-top: 1rem;
+}
+
+.metronome-details summary {
+  cursor: pointer;
+  color: var(--text-dim);
+  font-size: 0.875rem;
+  padding: 0.5rem 0;
+}
+
+.metronome-details summary:hover {
+  color: var(--text);
+}
+
+.metronome-stats {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.875rem;
+  color: var(--text-dim);
+  margin-top: 0.5rem;
+  padding: 0.75rem;
+  background: var(--surface-2);
+  border-radius: var(--radius);
+}
+
+.metronome-grade {
+  font-size: 1.125rem;
+  font-weight: bold;
+  margin-bottom: 0.25rem;
+}
+
+/* ---------- Audio Playback ---------- */
+
+.audio-playback {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.75rem;
+  background: var(--surface-2);
+  border-radius: var(--radius);
+  margin: 1rem 0;
+  flex-wrap: wrap;
+}
+
+.playback-btn {
+  background: var(--primary);
+  color: white;
+  border: none;
+  border-radius: 50%;
+  width: 36px;
+  height: 36px;
+  font-size: 1rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.playback-btn:hover {
+  opacity: 0.85;
+}
+
+.playback-time {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  white-space: nowrap;
+  min-width: 90px;
+}
+
+.playback-scrub {
+  flex: 1;
+  cursor: pointer;
+}
+
+.speed-controls {
+  display: flex;
+  gap: 0.25rem;
+  flex-shrink: 0;
+}
+
+.speed-btn {
+  background: transparent;
+  color: var(--text-dim);
+  border: 1px solid var(--text-dim);
+  border-radius: 4px;
+  padding: 0.2rem 0.4rem;
+  font-family: inherit;
+  font-size: 0.7rem;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.speed-btn:hover {
+  color: var(--text);
+  border-color: var(--text);
+}
+
+.speed-btn.active {
+  background: var(--primary);
+  color: white;
+  border-color: var(--primary);
+}
+
+.volume-control {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex-shrink: 0;
+}
+
+.volume-icon {
+  font-size: 0.85rem;
+  line-height: 1;
+}
+
+.volume-slider {
+  width: 60px;
+  cursor: pointer;
+}
+
+/* ---------- View Tabs ---------- */
+
+.view-tabs {
+  display: flex;
+  gap: 0.25rem;
+  margin: 0.75rem 0 0;
+}
+
+.view-tab {
+  background: transparent;
+  color: var(--text-dim);
+  border: 1px solid var(--text-dim);
+  border-radius: 4px;
+  padding: 0.3rem 0.75rem;
+  font-family: inherit;
+  font-size: 0.75rem;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.view-tab:hover {
+  color: var(--text);
+  border-color: var(--text);
+}
+
+.view-tab.active {
+  background: var(--primary);
+  color: white;
+  border-color: var(--primary);
+}
+
+/* ---------- Waveform ---------- */
+
+.waveform-display {
+  margin: 1rem 0;
+  height: 200px;
+  background: var(--surface-2);
+  border-radius: var(--radius);
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.waveform-canvas {
+  height: 100%;
+  min-width: 100%;
+  cursor: crosshair;
+  display: block;
+}
+
+/* ---------- Notation ---------- */
+
+.notation-display {
+  margin: 1rem 0;
+}
+
+.notation-display h3 {
+  margin: 0 0 0.5rem;
+  font-size: 1rem;
+  color: var(--text-dim);
+}
+
+.notation-scroll {
+  background: #f8f8f8;
+  border-radius: var(--radius);
+  padding: 0.5rem;
+  overflow-x: auto;
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+/* ---------- Collapsible Timeline ---------- */
+
+.timeline-details {
+  margin-top: 1rem;
+}
+
+.timeline-details summary {
+  cursor: pointer;
+  color: var(--text-dim);
+  font-size: 0.875rem;
+  padding: 0.5rem 0;
+}
+
+.timeline-details summary:hover {
+  color: var(--text);
+}
+
+.timeline-details .note-timeline {
+  margin-top: 0.5rem;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+/* ---------- Calibration ---------- */
+
+.calibration {
+  background: var(--surface);
+  padding: 1.5rem;
+  border-radius: var(--radius);
+}
+
+.calibration-header {
+  margin-bottom: 1.5rem;
+}
+
+.calibration-header h2 {
+  margin-bottom: 0.75rem;
+  font-size: 1.125rem;
+}
+
+.calibration-steps {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  font-size: 0.875rem;
+  color: var(--text-dim);
+}
+
+.step-indicator {
+  padding: 0.25rem 0.75rem;
+  border-radius: 4px;
+  background: var(--surface-2);
+}
+
+.step-indicator.active {
+  color: var(--text);
+  background: var(--primary);
+}
+
+.step-indicator.done {
+  color: var(--green);
+}
+
+.step-separator {
+  color: var(--text-dim);
+}
+
+.calibration-step {
+  margin-bottom: 1.5rem;
+}
+
+.calibration-instruction {
+  font-size: 0.875rem;
+  color: var(--text-dim);
+  line-height: 1.6;
+}
+
+.calibration-instruction strong {
+  color: var(--text);
+}
+
+.calibration-result-hint {
+  font-size: 0.8rem;
+  color: var(--green);
+  margin-top: 0.5rem;
+}
+
+.calibration-error {
+  color: var(--red);
+  font-size: 0.875rem;
+  margin-bottom: 1rem;
+  padding: 0.5rem 0.75rem;
+  background: rgba(248, 113, 113, 0.1);
+  border-radius: 4px;
+}
+
+.calibration-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  align-items: center;
+}
+
+.calibration-controls .start-btn,
+.calibration-controls .stop-btn {
+  width: 100%;
+}
+
+.recording-status {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.875rem;
+  color: var(--text);
+}
+
+.recording-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--red);
+  animation: pulse 1s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+.calibration-analyzing {
+  color: var(--text-dim);
+  font-style: italic;
+  font-size: 0.875rem;
+}
+
+.cancel-btn {
+  background: transparent;
+  color: var(--text-dim);
+  border: 1px solid var(--text-dim);
+  border-radius: var(--radius);
+  padding: 0.5rem 1rem;
+  font-family: inherit;
+  font-size: 0.875rem;
+  cursor: pointer;
+  width: 100%;
+}
+
+.cancel-btn:hover {
+  color: var(--text);
+  border-color: var(--text);
+}
+
+/* ---------- Recalibrate ---------- */
+
+.recalibrate-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.recalibrate-btn {
+  background: transparent;
+  color: var(--text-dim);
+  border: 1px solid var(--text-dim);
+  border-radius: var(--radius);
+  padding: 0.4rem 0.75rem;
+  font-family: inherit;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.recalibrate-btn:hover {
+  color: var(--text);
+  border-color: var(--text);
+}
+
+.calibration-date {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+}

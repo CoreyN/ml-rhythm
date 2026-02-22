@@ -1,0 +1,5 @@
+litestar>=2.0
+uvicorn[standard]
+librosa>=0.10
+numpy
+soundfile
